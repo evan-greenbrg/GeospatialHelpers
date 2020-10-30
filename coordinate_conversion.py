@@ -28,9 +28,9 @@ def transform_coordinates(pointX, pointY, iEPSG, oEPSG):
 
 
 # Transforming the centerline coordinates
-iepsg = 32614 
+iepsg = 26914 
 oepsg = 4326
-df = pandas.read_csv('PlatteCenterlineNew.csv')
+df = pandas.read_csv('riograndeTX_centerline.csv')
 df = df[['lon', 'lat']]
 xs = []
 ys = []
@@ -43,7 +43,7 @@ df['lon_'] = ys
 
 df_lats = df[['lon_', 'lat_']]
 
-df = df_lats.to_csv('PlatteCenterlineLats.csv')
+df = df_lats.to_csv('RioGrandeCenterlineLats.csv')
 
 # Transforming the bar coordinates
 iepsg = 32614 

@@ -1,12 +1,19 @@
 from datetime import datetime
+import io
 import os 
 import urllib.request
 import json
+import tempfile
+import zipfile
+
 
 from aws_sat_api.search import landsat
 import boto3
 import botocore
+import ogr
 import pandas
+import shapely.wkt
+import shapely.geometry
 
 
 test_files = [
@@ -137,14 +144,23 @@ class PullerSentinel:
         self.user, self.pw = self.get_credentials('ESA')
 
     def get_credentials(self, site):
-        hdd_dir = os.getenv("HDD")
-        creds_path = os.path.abspath(
-            os.path.join(hdd_dir, "remote_sensing/credentials.json")
-        )
+        creds_path = "/home/greenberg/ExtraSpace/PhD/credentials.json"
         with open(creds_path) as jfile:
             data = json.load(jfile)
 
         return data[site]['username'], data['ASF']['password']
+
+    def searchPoint(coord, user, pw):
+        url = 'https://scihub.copernicus.eu/dhus/search?q=platformname:"Sentinel-2"ANDfootprint:"Intersects{}"'.format(coord)
+#        url = 'https://scihub.copernicus.eu/dhus/search?q=footprint:"Intersects({s})"'.format(s=shape)
+        cmd = "wget --content-disposition {0} --user={1} --password={2}".format(
+            url,
+            user, 
+            pw
+        )
+        os.system(cmd)
+        
+        return self.user, self.pw
 
     def get_files(self, files, outdir):
         """
@@ -192,6 +208,31 @@ class PullerLansat8:
     def __init__(self):
         pass
 
+    def checkPoint(self, feature, point, mode):
+        geom = feature.GetGeometryRef()
+        shape = shapely.wkt.loads(geom.ExportToWkt())
+        if point.within(shape) and feature['Mode']==mode:
+            return True
+        else:
+            return False
+
+    def pathRowFromCoord(self, lon, lat):
+        # Open shape files of flight lines
+        shape_path = "/home/greenberg/ExtraSpace/PhD/DataFiles/landsat-path-row/WRS2_descending.shp"
+        wrs = ogr.Open(shape_path)
+        layer = wrs.GetLayer(0)
+
+        # Convert coords to shapely
+        point = shapely.geometry.Point(lon, lat)
+        mode = 'D'
+
+        i = 0
+        while not self.checkPoint(layer.GetFeature(i), point, mode):
+            i += 1
+        feature = layer.GetFeature(i)
+
+        return {'path': feature['PATH'], 'row': feature['ROW']}
+
     def find_scenes(self, path, row, full_search=True, 
                     clean=True, filt=True):
         
@@ -225,33 +266,59 @@ class PullerLansat8:
 
         return results_post
 
-    def download_from_list(self, keylist, opath, bands=[4, 3, 2]):
+    def download_from_list(self, keylist, opath, temp=False, bands=[4, 3, 2]):
         """
         Download landsat files from list of files
         """
         s3 = boto3.resource('s3')
         bucket = 'landsat-pds'
-#        opath = '/Volumes/EGG-HD/remote_sensing/testing/landsat/' # Testing
         for key in keylist:
-            opath_key = os.path.join(opath, key.split('/')[-1])
-            if not os.path.exists(opath_key):
-                os.makedirs(opath_key)
-            key_pure = key
-            for band in bands:
-                key = key_pure
-                try:
-                    key = key + '_B{}.TIF'.format(band)
-                    fn = key.split('/')[-1]
-                    print(key)
-                    s3.Bucket(bucket).download_file(
-                        key, 
-                        os.path.join(opath_key, fn)
-                    )
-                except botocore.exceptions.ClientError as e:
-                    if e.response['Error']['Code'] == "404":
-                        print("The object does not exist.")
-                    else:
-                        raise
+            # If it's a tempfile going to return a generator
+            if temp:
+                for band in bands:
+                    try:
+                        pull_key = key + '_B{}.TIF'.format(band)
+                        print(pull_key)
+
+                        # Tempfile save
+                        temp = tempfile.NamedTemporaryFile()
+                        s3.Bucket(bucket).download_file(
+                            pull_key, 
+                            temp.name
+                        )
+                        yield temp
+
+                    except botocore.exceptions.ClientError as e:
+                        if e.response['Error']['Code'] == "404":
+                            print("The object does not exist.")
+                        else:
+                            raise
+            # Not a tempfile
+            else:
+                opath_key = os.path.join(opath, key.split('/')[-1])
+
+                # Check if directories exist
+                if not os.path.exists(opath_key):
+                    os.makedirs(opath_key)
+
+                # Download each band
+                for band in bands:
+                    try:
+                        pull_key = key + '_B{}.TIF'.format(band)
+                        fn = key.split('/')[-1]
+                        print(pull_key)
+
+                        s3.Bucket(bucket).download_file(
+                            pull_key, 
+                            os.path.join(opath_key, fn)
+                        )
+
+                    # Error handling
+                    except botocore.exceptions.ClientError as e:
+                        if e.response['Error']['Code'] == "404":
+                            print("The object does not exist.")
+                        else:
+                            raise
 
     def download_from_csv(self, fpath, opath, bands=[4, 3, 2]):
         """
